@@ -1,38 +1,19 @@
 # twitter_tool.py
 # TO-DO: 
 # 1. save intermediate results
-# 2. improve async_get_tweets_by_id
-# 3. add async functions
-# 4. extract user, tweet objects
+# 2. add async functions
+# 3. extract user, tweet objects
 
-# TODO: align accounts information
-# tweeterpy
-
-# 删除：twikit
-# key:can_dm value:True
-# key:can_media_tag value:True
-# key:want_retweets value:False
-# key:protected value:False
-
-
-# 删除：tweeterpy
-# key:entities value:{'description': {'urls': []}, 'url': {'urls': [{'display_url': 'dair-ai.thinkific.com', 'expanded_url': 'https://dair-ai.thinkific.com/', 'url': 'https://t.co/JBU5beHQNs', 'indices': [0, 23]}]}}
-# key:profile_interstitial_type value:
+# TODO: Twikit could easily causing account ban
 
 import time
 import datetime
-import asyncio
 import random
 import requests
-import pandas as pd
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Literal
 
 import twikit  # pip install twikit https://github.com/d60/twikit
 from tweeterpy import TweeterPy  #   pip install tweeterpy https://github.com/iSarabjitDhiman/TweeterPy
-from tweeterpy.util import User, Tweet
-
-from utils.data_process import rename_key_in_dict, remove_key_values
-
 
 # Configure logging
 import logging
@@ -40,7 +21,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 MAX_RETRIES = 5
 BACKOFF_FACTOR = 0.5
+RESET_TIME_INTERVAL = 900  # rate limit reset time interval in seconds
+RATE_LIMIT = 50  # number of rate limit (# of calls)
+OVERALL_RATE_LIMIT = 600  # overall rate limit of a day
 X_ALTER_URL = "https://xapi.betaco.tech/x-thread-api?url="
+
 
 
 # for data alignment purpose
@@ -67,18 +52,12 @@ def align_tweeterpy_acct_data(tweeterpy_acct_data):
 
     return acct_info
 
-def align_twikit_acct_data(twikit_acct_data):
-    """process acct information from Twikit"""
-    twikit_acct_data['_client'] = 'twikit_client'
-    delete_keys = ['can_dm', 'can_media_tag', 'can_media_tag', 'want_retweets', 'protected']
-    acct_info = remove_key_values(twikit_acct_data, delete_keys)
-    return acct_info
-
 def align_tweeterpy_tweet_data(tweeterpy_tweet_data):
-    info = tweeterpy_tweet_data.get('data', {}).get('tweetResult', {}).get('result', {})
+    # tweeterpy_tweet_data = result.get('data', {}).get('tweetResult', {}) or result.get('data', {}).get('tweetResults', {})
+    info = tweeterpy_tweet_data.get('result', {})
 
     # for acct info
-    acct_data = info.get('core', {}).get('user_results', {}).get('result', {}).keys()
+    acct_data = info.get('core', {}).get('user_results', {}).get('result', {})
     acct_data = align_tweeterpy_acct_data(acct_data)
 
     # for tweet info
@@ -87,23 +66,34 @@ def align_tweeterpy_tweet_data(tweeterpy_tweet_data):
 
     return tweet_data, acct_data
 
+def align_twikit_acct_data(twikit_acct_data):
+    """process acct information from Twikit"""
+    twikit_acct_info = twikit_acct_data.__dict__
+    twikit_acct_info['_client'] = 'twikit_client'
+    delete_keys = ['can_dm', 'can_media_tag', 'can_media_tag', 'want_retweets', 'protected']
+    acct_info = remove_key_values(twikit_acct_info, delete_keys)
+    return acct_info
+
 def align_twikit_tweet_data(twikit_tweet_data):
     info = twikit_tweet_data.__dict__.get('_data', {})
 
-    acct_data = info.get('core', {}).get('user_results', {}).get('result', {}).keys()
+    acct_data = info.get('core', {}).get('user_results', {}).get('result', {})
     acct_data = align_tweeterpy_acct_data(acct_data)
     acct_data['_client'] = 'twikit_client'
+    keys_to_delete = ['following', 'can_dm', 'can_media_tag', 'want_retweets']
+    acct_data = remove_key_values(acct_data, keys_to_delete)
 
     tweet_data = info.get('legacy', {})
-    reply_to = twikit_tweet_data.__dict__.get('reply_to', [])[0]
-    in_reply_to_status_id_str = reply_to.__dict__.get('_data', {}).get('rest_id')
-    in_reply_to_user_id_str = reply_to.__dict__.get('_data', {}).get('core', {}).get('rest_id')
-    in_reply_to_screen_name = reply_to.__dict__.get('_data', {}).get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {}).get('screen_name')
-    tweet_data['in_reply_to_status_id_str'] = in_reply_to_status_id_str
-    tweet_data['in_reply_to_user_id_str'] = in_reply_to_user_id_str
-    tweet_data['in_reply_to_screen_name'] = in_reply_to_screen_name
+    reply_to = twikit_tweet_data.__dict__.get('reply_to', [])
+    if reply_to:
+        in_reply_to_status_id_str = reply_to.__dict__.get('_data', {}).get('rest_id')
+        in_reply_to_user_id_str = reply_to.__dict__.get('_data', {}).get('core', {}).get('rest_id')
+        in_reply_to_screen_name = reply_to.__dict__.get('_data', {}).get('core', {}).get('user_results', {}).get('result', {}).get('legacy', {}).get('screen_name')
+        tweet_data['in_reply_to_status_id_str'] = in_reply_to_status_id_str
+        tweet_data['in_reply_to_user_id_str'] = in_reply_to_user_id_str
+        tweet_data['in_reply_to_screen_name'] = in_reply_to_screen_name
+        
     tweet_data['id'] = info.get('rest_id')
-
     return tweet_data, acct_data
 
 
@@ -111,6 +101,7 @@ class TwitterKit:
     def __init__(
             self, 
             proxy_list, 
+            twikit_cookies_path: Optional[str]=None,
             x_login_name: Optional[str]=None,
             x_password: Optional[str]=None,
             x_login_email: Optional[str]=None,
@@ -133,13 +124,14 @@ class TwitterKit:
                 - remaining_requests: remaining usage cnt
                 - next_reset_tm: rate limit next reset time
         """
+        self.twikit_cookies_path = twikit_cookies_path
         self.x_login_name = x_login_name
         self.x_password = x_password
         self.x_login_email = x_login_email
         self.max_retires = max_retires
 
         self.tweeterpy_clients_usage = [{'proxy': proxy} for proxy in proxy_list]  # save client / proxy usage information
-        self.bad_proxies = set()  # store unusable proxies
+        self.twikit_client_usage = {}
         self.current_proxy = None
 
     def _load_tweeterpy_client(self, excluded_proxies: Optional[Set]=set()):
@@ -178,7 +170,7 @@ class TwitterKit:
             self.current_proxy = None
 
 
-    def get_userid(self, username) -> str:
+    def get_user_id(self, username) -> str:
         """Get user ID based on user name (screen name like 'elonmusk')."""
         attempt = 0
         excluded_proxies = set()
@@ -205,12 +197,19 @@ class TwitterKit:
         excluded_proxies = set()
         while attempt < self.max_retires:
             try:
-                user_data = self.tweeterpy_client.get_user_data(username)
-                return align_tweeterpy_acct_data(user_data)
+                user_info = self.tweeterpy_client.get_user_data(username)
+                break
             except Exception as e:
                 excluded_proxies.add(self.current_proxy)
                 self._load_tweeterpy_client(excluded_proxies)
                 attempt += 1
+        
+        # decode user info
+        if user_info:
+            try:
+                return align_tweeterpy_acct_data(user_info)
+            except Exception as e:
+                print(f"TweeterPy decode error: {e}")
         return None
 
 
@@ -232,20 +231,28 @@ class TwitterKit:
         excluded_proxies = set()
         while attempt < self.max_retires:
             try:
-                tweet = self.tweeterpy_client.get_tweet(tweet_id)
-                api_limit = tweet.get('api_rate_limit', {})
+                tweet_info = self.tweeterpy_client.get_tweet(tweet_id)
+                api_limit = tweet_info.get('api_rate_limit', {})
                 # update client usage info
                 idx = [x['proxy'] for x in self.tweeterpy_clients_usage].index(self.current_proxy)
                 self.tweeterpy_clients_usage[idx]['last_call_tm'] = int(time.time())
                 self.tweeterpy_clients_usage[idx]['remaining_requests'] = api_limit.get('remaining_requests_count')
                 self.tweeterpy_clients_usage[idx]['next_reset_tm'] = int((datetime.datetime.now() + api_limit.get('reset_after_datetime_object')).timestamp())
-                return tweet
+                break
             
             except Exception as e:
                 excluded_proxies.add(self.current_proxy)
                 self._load_tweeterpy_client(excluded_proxies)
                 attempt += 1
-        return None
+        
+        # decode tweet info
+        if tweet_info:
+            try:
+                tweet_data, acct_data = align_tweeterpy_tweet_data(tweet_info.get('data', {}).get('tweetResult', {}))
+                return tweet_data, acct_data
+            except Exception as e:
+                print(f"TweeterPy decode error: {e}")
+        return None, None
 
 
     def get_tweets_by_user(self, username, total=20):
@@ -258,30 +265,65 @@ class TwitterKit:
         excluded_proxies = set()
         while attempt < self.max_retires:
             try:
-                user_tweets = self.tweeterpy_client.get_user_tweets(username, total=total)
-                api_limit = user_tweets.get('api_rate_limit', {})
+                user_tweets_info = self.tweeterpy_client.get_user_tweets(username, total=total)
+                api_limit = user_tweets_info.get('api_rate_limit', {})
                 # update client usage info
                 idx = [x['proxy'] for x in self.tweeterpy_clients_usage].index(self.current_proxy)
                 self.tweeterpy_clients_usage[idx]['last_call_tm'] = int(time.time())
                 self.tweeterpy_clients_usage[idx]['remaining_requests'] = api_limit.get('remaining_requests_count')
                 self.tweeterpy_clients_usage[idx]['next_reset_tm'] = int((datetime.datetime.now() + api_limit.get('reset_after_datetime_object')).timestamp())
-                return user_tweets
+                break
             
             except Exception as e:
                 excluded_proxies.add(self.current_proxy)
                 self._load_tweeterpy_client()
                 attempt += 1
-        return None
 
-
-    # second approach by utilizing twikit package, which requires x_username, x_password, x_email
+        # decode tweet info
+        if user_tweets_info and len(user_tweets_info) > 0:
+            try:
+                accts_data, tweets_data = [], []
+                for item in user_tweets_info.get('data', []):
+                    item_info = item.get('content', {}).get('itemContent')
+                    tweet_data, acct_data = align_tweeterpy_tweet_data(item_info.get('tweet_results', {})) 
+                    accts_data.append(acct_data)
+                    tweets_data.append(tweet_data)
+                return tweets_data, accts_data
+            except Exception as e:
+                print(f"TweeterPy decode error: {e}")
+        return None, None
+    
     async def _load_twikit_client(self):
         """"twikit require twitter account name, email and password
         Note:
-            Do not use proxy, since Twitter detects user's IP and may ban accounts with suspicious IP shifts.
+            1. Do not use proxy, since Twitter detects user's IP and may ban accounts with suspicious IP shifts.
+            2. Rate limit: overall constraint is 600 posts per day. Also in every 15 minutes:
+                    get_latest_timeline	500	HomeLatestTimeline
+                    get_timeline	500	HomeTimeline
+                    get_list_tweets	500	ListLatestTweetsTimeline
+                    get_trends	20000	guide.json
+                    get_tweet_by_id	150	TweetDetail
+                    get_user_by_id	500	UserByRestId
+                    get_user_by_screen_name	95	UserByScreenName
+                    get_user_tweets[tweet_type="Tweets"]	50	UserTweets
+                    get_user_tweets[tweet_type="Replies"]	50	UserTweetsAndReplies
+              More information could be found from: https://github.com/d60/twikit/blob/main/ratelimits.md
+            3. Also try to best protect your account: https://github.com/d60/twikit/blob/main/ToProtectYourAccount.md
         """
+        if self.twikit_cookies_path:
+            try:
+                self.twikit_client = twikit.Client('en-US')
+                self.twikit_client.load_cookies(self.twikit_cookies_path)
+                self.twikit_client_usage['initiate_tm'] = int(time.time())
+                self.twikit_client_usage['remaining_requests'] = 50
+                self.twikit_client_usage['next_reset_tm'] = int(time.time())+900
 
-        if self.x_login_name and self.x_password and self.x_login_email:
+            except Exception as e:
+                logging.error(f"Failed to initiate twkit! Please double check your cookies file in {self.twikit_cookies_path}.")
+                self.twikit_client = None
+                self.twikit_client_usage = None
+
+        elif self.x_login_name and self.x_password and self.x_login_email:
             try:
                 self.twikit_client = twikit.Client('en-US')
                 await self.twikit_client.login(
@@ -289,9 +331,18 @@ class TwitterKit:
                         auth_info_2=self.x_login_email,
                         password=self.x_password
                     )
+                self.twikit_client.save_cookies('cookies.json')
+                self.twikit_client_usage = {
+                    'initiate_tm': int(time.time()),
+                    'remaining_requests': 50,
+                    'next_reset_tm': int(time.time())+900}
             except Exception as e:
                 logging.error(f"Failed to initiate twkit! Please double check your x_login_name / x_login_email / x_password.")
                 self.twikit_client = None
+                self.twikit_client_usage = None
+
+        else:
+            self.twikit_client = None
 
 
     async def async_get_user_info(self, screen_nm: Optional[str]=None, uid: Optional[str]=None):
@@ -304,45 +355,209 @@ class TwitterKit:
             try:
                 if screen_nm is not None:
                     acct_data = await self.twikit_client.get_user_by_screen_name(screen_nm)
+                    break
                 else:
-                    acct_data = await self.twikit_client.get_user_by_screen_name(uid)
-                return align_twikit_acct_data(acct_data)
+                    acct_data = await self.twikit_client.get_user_by_id(uid)
+                    break
             except:
                 attempt += 1
-        return None
-
-    async def twikit_get_tweet_by_ids(tweet_id: Optional[List[str]]):
-        """Retrieve multiple tweets by IDs."""
-        return asyncget_tweets_by_ids(ids: list[str]
+                acct_data = None
+                time.sleep(BACKOFF_FACTOR * (2 ** attempt))  # Exponential backoff
         
+        if acct_data:
+            try:
+                return align_twikit_acct_data(acct_data)
+            except Exception as e:
+                print(f"Twikit data decode error: {e}")
+        return None
+    
+
+    async def async_get_tweeets_by_ids(self, tweet_ids: Optional[List[str]]):
+        """get tweets info given twitter ids through Twikit"""
+        attempt = 0
+        while attempt < self.max_retires:
+            if self.twikit_client_usage.get('remaining_requests', 20) <= 0 and self.twikit_client_usage.get('next_reset_tm') > int(time.time()):
+                time_gap = self.twikit_client_usage.get('next_reset_tm') - int(time.time())
+                time.sleep(time_gap)
+                self.twikit_client_usage['remaining_requests'] = 50
+                self.twikit_client_usage['next_reset_tm'] = int(time.time())+900
+                continue
+            else:
+                self.twikit_client_usage['remaining_requests'] -= 1
+                self.twikit_client_usage['last_call_tm'] = int(time.time())
+                try:
+                    tweets_info = await self.twikit_client.get_tweets_by_ids(tweet_ids)
+                    break
+                except:
+                    attempt += 1
+                    tweets_info = None
+                    time.sleep(BACKOFF_FACTOR * (2 ** attempt))  # Exponential backoff
+
+        if tweets_info:
+            try:
+                tweets_data, accts_data = [], []
+                for item in tweets_info:
+                    tweet_data, acct_data = align_twikit_tweet_data(item)
+                    tweets_data.append(tweet_data)
+                    accts_data.append(acct_data)
+                return tweets_data, accts_data
+            except Exception as e:
+                print(f"Twikit data decode error: {e}")
+        return None, None  
+
+
+    async def async_get_tweets_by_user(self, user_id: str, tweet_type: Literal['Tweets', 'Replies', 'Media', 'Likes'], count: int = 40,):
+        """search tweets info by key words through Twikit"""
+        attempt = 0
+        while attempt < self.max_retires:
+            if self.twikit_client_usage.get('remaining_requests', 20) <= 0 and self.twikit_client_usage.get('next_reset_tm') > int(time.time()):
+                time_gap = self.twikit_client_usage.get('next_reset_tm') - int(time.time())
+                time.sleep(time_gap) 
+                self.twikit_client_usage['remaining_requests'] = 50
+                self.twikit_client_usage['next_reset_tm'] = int(time.time())+900
+                continue
+            else:
+                self.twikit_client_usage['remaining_requests'] -= 1
+                self.twikit_client_usage['last_call_tm'] = int(time.time())
+                try:
+                    tweets_info = await self.twikit_client.get_user_tweets(user_id, tweet_type, count)
+                    break
+                except:
+                    attempt += 1
+                    tweets_info = None
+                    time.sleep(BACKOFF_FACTOR * (2 ** attempt))  # Exponential backoff
+        
+        if tweets_info:
+            try:
+                tweets_data, accts_data = [], []
+                for item in tweets_info:
+                    tweet_data, acct_data = align_twikit_tweet_data(item)
+                    tweets_data.append(tweet_data)
+                    accts_data.append(acct_data)
+                return tweets_data, accts_data
+            except Exception as e:
+                print(f"Twikit data decode error: {e}")
+
+
+    async def async_search_tweeets(self, query: str, product: Literal['Top', 'Latest', 'Media'], count: int = 20):
+        """search tweets info by key words through Twikit"""
+        attempt = 0
+        while attempt < self.max_retires:
+            if self.twikit_client_usage.get('remaining_requests', 20) <= 0 and self.twikit_client_usage.get('next_reset_tm') > int(time.time()):
+                time_gap = self.twikit_client_usage.get('next_reset_tm') - int(time.time())
+                time.sleep(time_gap) 
+                self.twikit_client_usage['remaining_requests'] = 50
+                self.twikit_client_usage['next_reset_tm'] = int(time.time())+900
+                continue
+            else:
+                self.twikit_client_usage['remaining_requests'] -= 1
+                self.twikit_client_usage['last_call_tm'] = int(time.time())      
+                try:
+                    tweets_info = await self.twikit_client.search_tweet(query, product, count)
+                    break
+                except:
+                    attempt += 1
+                    tweets_info = None
+                    time.sleep(BACKOFF_FACTOR * (2 ** attempt))  # Exponential backoff
+        
+        if tweets_info:
+            try:
+                tweets_data, accts_data = [], []
+                for item in tweets_info:
+                    tweet_data, acct_data = align_twikit_tweet_data(item)
+                    tweets_data.append(tweet_data)
+                    accts_data.append(acct_data)
+                return tweets_data, accts_data
+            except Exception as e:
+                print(f"Twikit data decode error: {e}")
+        return None, None  
+    
+
+    async def async_get_recommended_tweeets(self, count: int = 20):
+        """get recommended tweets from Home -> For You through Twikit"""
+        attempt = 0
+        while attempt < self.max_retires:
+            try:
+                tweets_info = await self.twikit_client.get_timeline(count)
+                break
+            except:
+                attempt += 1
+                tweets_info = None
+                time.sleep(BACKOFF_FACTOR * (2 ** attempt))  # Exponential backoff
+        
+        if tweets_info:
+            try:
+                tweets_data, accts_data = [], []
+                for item in tweets_info:
+                    tweet_data, acctt_data = align_twikit_tweet_data(item)
+                    tweets_data.append(tweet_data)
+                    accts_data.append(acctt_data)
+                return tweets_data, accts_data
+            except Exception as e:
+                print(f"Twikit data decode error: {e}")
+        return None, None  
+    
+
+    async def async_get_following_tweeets_info(self, count: int = 20):
+        """get recommended tweets from Home -> For You through Twikit"""
+        attempt = 0
+        while attempt < self.max_retires:
+            try:
+                tweets_info = await self.twikit_client.get_latest_timeline(count)
+                break
+            except:
+                attempt += 1
+                tweets_info = None
+                time.sleep(BACKOFF_FACTOR * (2 ** attempt))  # Exponential backoff
+        
+        if tweets_info:
+            try:
+                tweets_data, accts_data = [], []
+                for item in tweets_info:
+                    tweet_data, acctt_data = align_twikit_tweet_data(item)
+                    tweets_data.append(tweet_data)
+                    accts_data.append(acctt_data)
+                return tweets_data, accts_data
+            except Exception as e:
+                print(f"Twikit data decode error: {e}")
+        return None, None  
 
 
     # yet another approach to get tweet by user naem and tweet id (not recommended)
-    def scrape_tweet_by_id(self, username, tweet_id):
+    def scrape_tweet_by_id(self, screen_nm, tweet_id, user_agents, timeout:Optional[int]=10, ssl_verify:Optional[bool]=False):
         """scrape tweet using alternative urls
         Args:
-            username (str): user name (screen name like 'elonmusk')
+            screen_nm (str): user name (screen name like 'elonmusk')
             tweet_id (str): status id of tweet url
         Returns:
             tweet_dcts (list of dict): 
                   a simplified version of tweet dicts, including only author, text, tweet_id, timestamp, media, links.
                   include multiple tweet under same user.
-                  sample refere to 'https://xapi.betaco.tech/x-thread-api?url=https://x.com/ulriklykke/status/1879549567278203364'
         """
-        def _scrape_tweet_by_id_inner(proxy, username, tweet_id):
-           try:
-                session = self._get_session(proxy)
-                link = f"{X_ALTER_URL}https://x.com/{username}/status/{tweet_id}"
-                custom_headers = {"User-Agent": random.choice(self.user_agents)}
-                response = session.get(
-                    url=link,
-                    headers=custom_headers,
-                    timeout=self.timeout,
-                    verify=self.ssl_verify
-                )
-                response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
-                return response.json()
-           except requests.exceptions.RequestException as e:
-                logging.error(f"Direct API request failed using proxy {proxy}: {e}")
-                raise  # Re-raise to trigger retry in _make_request   
-        return self._make_request(_scrape_tweet_by_id_inner, username, tweet_id) 
+        for _, item in enumerate(self.tweeterpy_clients_usage):
+            if item.get('is_bad_proxy', False) == True:
+                continue
+            
+            else:
+                session = requests.Session()
+                session.proxies = {'http': item.get('proxy')}
+                link = f"{X_ALTER_URL}https://x.com/{screen_nm}/status/{tweet_id}"
+                if user_agents and len(user_agents) > 0:
+                    custom_headers = {"User-Agent": random.choice(user_agents)}
+                else:
+                    custom_headers = {}
+                try:
+                    response = session.get(
+                        url=link,
+                        headers=custom_headers,
+                        timeout=timeout,
+                        verify=ssl_verify
+                    )
+                    response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+                    return response.json()
+                except requests.exceptions.RequestException as e:
+                    logging.error(f"Direct API request failed using proxy {item.get('proxy')}: {e}")
+                    item['is_bad_proxy'] = True
+                    time.sleep(3)
+                    continue
+        return None
