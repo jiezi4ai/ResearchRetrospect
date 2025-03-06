@@ -3,7 +3,7 @@ import json
 import time
 import PIL.Image
 
-from models import llm_gen_w_retry, llm_image_gen_w_retry
+from GitHub.ResearchRetrospect.wip.models.llms import llm_gen_w_retry, llm_image_gen_w_retry
 from prompts import tags_example_json, tags_info_prompt, topics_example_json, topics_prompt
 from prompts import role_prompt, summary_prompt, method_prompt, conclusion_prompt
 

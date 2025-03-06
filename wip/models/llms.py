@@ -2,20 +2,6 @@ import time
 import ollama
 import numpy as np
 
-async def ollama_embedding(model, texts :list[str]) -> np.ndarray:
-    embed_text = []
-    for text in texts:
-      data = ollama.embeddings(model=model, prompt=text)
-      embed_text.append(data["embedding"])
-    return embed_text
-
-from sentence_transformers import util
-
-def semantic_similarity_matrix(vec_x, vec_y):
-    # embeds = await ollama_embedding(text_lst)
-    cosine_scores = util.pytorch_cos_sim(vec_x, vec_y)  # 计算余弦相似度矩阵，仅计算上三角部分
-    return cosine_scores
-
 import os
 from google import genai
 from google.genai import types
