@@ -58,3 +58,27 @@ abstract:'In order to thrive in hostile and ever-changing natural environments, 
 
 Please output in list format.
 """
+
+
+search_query_prompt = """You are a sophisticated academic scholar and an expert with search engine. 
+Given the following paper related information, could you utilize your knowledge and skills to compose 2-4 search queries?
+These search queries would be used in Google Scholar to find more related works and literatures.
+
+## INPUT
+Now start analyzing the following paper.
+<title> {title} </title>
+
+<abstract>
+{abstract}
+</abstract>
+
+<keywords> {keywords} </keywords>
+
+<tags> {tags} </tags>
+
+<fields> {field_of_study} </fields>
+
+## OUTPUT
+Output your search queries in list format. Do not include anything else.
+
+"""
